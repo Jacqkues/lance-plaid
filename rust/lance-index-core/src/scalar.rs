@@ -56,6 +56,7 @@ pub enum BuiltinIndexType {
     Inverted,
     Fm,
     MinHashLsh,
+    Plaid,
 }
 
 impl BuiltinIndexType {
@@ -71,6 +72,7 @@ impl BuiltinIndexType {
             Self::RTree => "rtree",
             Self::Fm => "fm",
             Self::MinHashLsh => "minhashlsh",
+            Self::Plaid => "plaid",
         }
     }
 }
@@ -90,6 +92,7 @@ impl TryFrom<IndexType> for BuiltinIndexType {
             IndexType::RTree => Ok(Self::RTree),
             IndexType::Fm => Ok(Self::Fm),
             IndexType::MinHashLsh => Ok(Self::MinHashLsh),
+            IndexType::Plaid => Ok(Self::Plaid),
             _ => Err(Error::index("Invalid index type".to_string())),
         }
     }

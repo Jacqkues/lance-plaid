@@ -309,3 +309,22 @@ message MinHashLshIndexDetails {
    */
   uint32 signature_version = 5;
 }
+
+/* PLAID multivector index details.
+ *
+ * A PLAID index stores each document (a row of a List<FixedSizeList<float>>
+ * column) as one centroid id per token plus a `num_bits`-bit quantized
+ * residual per token dimension, and an inverted list from each centroid to
+ * the documents with a token assigned to it. See ColBERTv2/PLAID
+ * (Santhanam et al., 2022).
+ */
+message PlaidIndexDetails {
+  /* Bits per quantized residual dimension: 1, 2, 4 or 8. */
+  uint32 num_bits = 1;
+
+  /* Number of centroids (coarse clusters) the token embeddings are assigned to. */
+  uint32 num_centroids = 2;
+
+  /* Dimension of each token embedding. */
+  uint32 dimension = 3;
+}

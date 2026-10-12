@@ -34,6 +34,7 @@ pub mod hnsw;
 pub mod ivf;
 pub mod kmeans;
 pub mod pairwise;
+pub mod plaid;
 pub mod pq;
 pub mod quantizer;
 pub mod residual;

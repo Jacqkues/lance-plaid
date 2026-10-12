@@ -9,6 +9,7 @@ use lance_core::{Error, Result};
 
 #[cfg(feature = "geo")]
 use crate::scalar::rtree::RTreeIndexPlugin;
+use crate::vector::plaid::PlaidIndexPlugin;
 use crate::{
     pb, pbold,
     scalar::{
@@ -110,6 +111,7 @@ impl IndexPluginRegistry {
         registry.add_plugin::<pb::JsonIndexDetails, JsonIndexPlugin>();
         registry.add_plugin::<pb::FmIndexDetails, FMIndexPlugin>();
         registry.add_plugin::<pb::MinHashLshIndexDetails, MinHashLshIndexPlugin>();
+        registry.add_plugin::<pb::PlaidIndexDetails, PlaidIndexPlugin>();
         #[cfg(feature = "geo")]
         registry.add_plugin::<pb::RTreeIndexDetails, RTreeIndexPlugin>();
 
