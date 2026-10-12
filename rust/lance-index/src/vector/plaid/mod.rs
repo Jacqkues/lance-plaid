@@ -40,7 +40,7 @@ mod index;
 
 pub use builder::PlaidIndexWriter;
 pub use codec::{ResidualCodec, kmeans_params};
-pub use index::PlaidIndex;
+pub use index::{PlaidIndex, ResidualChunk, Shortlist};
 
 use std::sync::Arc;
 
@@ -183,9 +183,9 @@ impl ScalarIndexPlugin for PlaidIndexPlugin {
         _index_details: &prost_types::Any,
         _index_version: u32,
         frag_reuse_index: Option<Arc<dyn RowIdRemapper>>,
-        _cache: &LanceCache,
+        cache: &LanceCache,
     ) -> Result<Arc<dyn ScalarIndex>> {
-        Ok(PlaidIndex::load(index_store, frag_reuse_index).await? as Arc<dyn ScalarIndex>)
+        Ok(PlaidIndex::load(index_store, frag_reuse_index, cache).await? as Arc<dyn ScalarIndex>)
     }
 
     fn details_as_json(&self, details: &prost_types::Any) -> Result<serde_json::Value> {

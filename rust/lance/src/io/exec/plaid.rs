@@ -241,11 +241,23 @@ impl ExecutionPlan for PlaidSearchExec {
 
             let mut hits: Vec<(u64, f32)> = Vec::new();
             for index in indices {
-                let mask = mask.clone();
-                let params = params.clone();
-                let query_values = query_values.clone();
+                let (mask, params, query_values) =
+                    (mask.clone(), params.clone(), query_values.clone());
+                let index_for_cpu = index.clone();
+                let shortlist = spawn_cpu(move || {
+                    plaid_segment(index_for_cpu.as_ref())?.shortlist(
+                        query_values.values(),
+                        k,
+                        &params,
+                        &mask,
+                    )
+                })
+                .await?;
+                let chunks = plaid_segment(index.as_ref())?
+                    .load_residuals(&shortlist)
+                    .await?;
                 let segment_hits = spawn_cpu(move || {
-                    plaid_segment(index.as_ref())?.search(query_values.values(), k, &params, &mask)
+                    plaid_segment(index.as_ref())?.rescore(&shortlist, &chunks, k)
                 })
                 .await?;
                 hits.extend(segment_hits);

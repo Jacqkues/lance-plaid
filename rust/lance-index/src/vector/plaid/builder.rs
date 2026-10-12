@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use arrow_array::builder::{BinaryBuilder, ListBuilder, UInt32Builder};
+use arrow_array::builder::{BinaryBuilder, Float32Builder, ListBuilder, UInt32Builder};
 use arrow_array::cast::AsArray;
 use arrow_array::types::UInt64Type;
 use arrow_array::{
@@ -40,6 +40,7 @@ pub(crate) const IVF_LENGTH_COLUMN: &str = "ivf_length";
 pub(crate) const DOC_ID_COLUMN: &str = "doc_id";
 pub(crate) const CODES_COLUMN: &str = "codes";
 pub(crate) const RESIDUALS_COLUMN: &str = "residuals";
+pub(crate) const INV_NORMS_COLUMN: &str = "inv_norms";
 
 /// Rows per batch when writing the inverted lists.
 const IVF_WRITE_ROWS: usize = 1 << 20;
@@ -67,6 +68,11 @@ pub(crate) fn docs_schema() -> Arc<Schema> {
             false,
         ),
         Field::new(RESIDUALS_COLUMN, DataType::Binary, false),
+        Field::new(
+            INV_NORMS_COLUMN,
+            DataType::List(Arc::new(Field::new("item", DataType::Float32, false))),
+            false,
+        ),
     ]))
 }
 
@@ -272,6 +278,7 @@ fn encode_batch(codec: &ResidualCodec, batch: &RecordBatch) -> Result<RecordBatc
     let codes = codec.assign(tokens.view());
     let mut packed = Vec::new();
     codec.encode_residuals(tokens.view(), &codes, &mut packed);
+    let inv_norms = codec.inv_norms(&codes, &packed);
 
     let packed_dim = codec.packed_dim();
     let mut out_row_ids = Vec::with_capacity(lists.len());
@@ -279,6 +286,9 @@ fn encode_batch(codec: &ResidualCodec, batch: &RecordBatch) -> Result<RecordBatc
         ListBuilder::with_capacity(UInt32Builder::with_capacity(codes.len()), lists.len())
             .with_field(Arc::new(Field::new("item", DataType::UInt32, false)));
     let mut out_residuals = BinaryBuilder::with_capacity(lists.len(), packed.len());
+    let mut out_inv_norms =
+        ListBuilder::with_capacity(Float32Builder::with_capacity(codes.len()), lists.len())
+            .with_field(Arc::new(Field::new("item", DataType::Float32, false)));
     for row in 0..lists.len() {
         let start = offsets[row] as usize - first;
         let end = offsets[row + 1] as usize - first;
@@ -289,6 +299,8 @@ fn encode_batch(codec: &ResidualCodec, batch: &RecordBatch) -> Result<RecordBatc
         out_codes.values().append_slice(&codes[start..end]);
         out_codes.append(true);
         out_residuals.append_value(&packed[start * packed_dim..end * packed_dim]);
+        out_inv_norms.values().append_slice(&inv_norms[start..end]);
+        out_inv_norms.append(true);
     }
     Ok(RecordBatch::try_new(
         docs_schema(),
@@ -296,6 +308,7 @@ fn encode_batch(codec: &ResidualCodec, batch: &RecordBatch) -> Result<RecordBatc
             Arc::new(UInt64Array::from(out_row_ids)) as ArrayRef,
             Arc::new(out_codes.finish()) as ArrayRef,
             Arc::new(out_residuals.finish()) as ArrayRef,
+            Arc::new(out_inv_norms.finish()) as ArrayRef,
         ],
     )?)
 }
@@ -315,12 +328,14 @@ pub(crate) fn with_row_ids(batch: &RecordBatch, row_ids: Vec<Option<u64>>) -> Re
     let kept = filter_docs(batch, &keep)?;
     let codes: &ListArray = kept[CODES_COLUMN].as_list::<i32>();
     let residuals: &BinaryArray = kept[RESIDUALS_COLUMN].as_binary::<i32>();
+    let inv_norms: &ListArray = kept[INV_NORMS_COLUMN].as_list::<i32>();
     Ok(RecordBatch::try_new(
         docs_schema(),
         vec![
             Arc::new(row_ids) as ArrayRef,
             Arc::new(codes.clone()) as ArrayRef,
             Arc::new(residuals.clone()) as ArrayRef,
+            Arc::new(inv_norms.clone()) as ArrayRef,
         ],
     )?)
 }

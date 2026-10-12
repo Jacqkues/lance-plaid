@@ -23,6 +23,7 @@ use lance_arrow::FixedSizeListArrayExt;
 
 use super::codec::normalize_rows;
 use super::*;
+use crate::Index;
 use crate::scalar::OldIndexDataFilter;
 use crate::scalar::lance_format::LanceIndexStore;
 use crate::scalar::registry::VALUE_COLUMN_NAME;
@@ -172,12 +173,12 @@ async fn build(corpus: &Corpus, store: &LanceIndexStore, num_bits: u8) -> Arc<Pl
         .await
         .unwrap();
     writer.finish().await.unwrap();
-    PlaidIndex::load(Arc::new(store.clone()), None)
+    PlaidIndex::load(Arc::new(store.clone()), None, &LanceCache::no_cache())
         .await
         .unwrap()
 }
 
-fn recall(
+async fn recall(
     index: &PlaidIndex,
     corpus: &mut Corpus,
     params: &PlaidSearchParams,
@@ -189,6 +190,7 @@ fn recall(
         let expected = corpus.exact_top_k(&query, 10);
         let found: Vec<u64> = index
             .search(query.as_slice().unwrap(), 10, params, mask)
+            .await
             .unwrap()
             .into_iter()
             .map(|(row_id, _)| row_id)
@@ -210,8 +212,36 @@ async fn test_exhaustive_search_is_exact() {
         n_full_scores: 4 * 500,
         centroid_score_threshold: None,
     };
-    let recall = recall(&index, &mut corpus, &exhaustive, &RowAddrMask::all_rows());
+    let recall = recall(&index, &mut corpus, &exhaustive, &RowAddrMask::all_rows()).await;
     assert!(recall >= 0.98, "recall@10 {recall} < 0.98");
+}
+
+/// Residuals are read in chunks of 1024 documents; documents of every chunk
+/// are found and rescored exactly.
+#[tokio::test]
+async fn test_search_spans_residual_chunks() {
+    let corpus = Corpus::new(2500, 9);
+    let (_dir, store) = test_store();
+    let index = build(&corpus, &store, 8).await;
+    index.prewarm().await.unwrap();
+    let params = PlaidSearchParams {
+        n_ivf_probe: 32,
+        n_full_scores: 4 * 2500,
+        centroid_score_threshold: None,
+    };
+    for doc in [3usize, 1500, 2499] {
+        let query = corpus.docs[doc].clone().unwrap();
+        let results = index
+            .search(
+                query.as_slice().unwrap(),
+                1,
+                &params,
+                &RowAddrMask::all_rows(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(results[0].0, doc as u64);
+    }
 }
 
 /// With the default pruning, recall is bounded by the approximate centroid
@@ -229,7 +259,7 @@ async fn test_search_recall_against_exact_maxsim(#[case] num_bits: u8) {
         n_full_scores: 256,
         centroid_score_threshold: None,
     };
-    let recall = recall(&index, &mut corpus, &params, &RowAddrMask::all_rows());
+    let recall = recall(&index, &mut corpus, &params, &RowAddrMask::all_rows()).await;
     eprintln!("num_bits={num_bits} recall={recall}");
     assert!(recall >= 0.7, "recall@10 {recall} < 0.7");
 }
@@ -247,6 +277,7 @@ async fn test_distance_is_num_query_tokens_minus_maxsim() {
             &PlaidSearchParams::default(),
             &RowAddrMask::all_rows(),
         )
+        .await
         .unwrap();
     assert!(results.windows(2).all(|w| w[0].1 <= w[1].1), "{results:?}");
     let (row_id, distance) = results[0];
@@ -284,6 +315,7 @@ async fn test_null_and_empty_documents_are_not_indexed() {
             },
             &RowAddrMask::all_rows(),
         )
+        .await
         .unwrap();
     assert_eq!(results.len(), 298);
     assert!(
@@ -311,6 +343,7 @@ async fn test_score_threshold_keeps_best_centroid_of_each_token() {
             &params,
             &RowAddrMask::all_rows(),
         )
+        .await
         .unwrap();
     assert_eq!(results.len(), 5);
 }
@@ -331,6 +364,7 @@ async fn test_search_respects_mask() {
                 &PlaidSearchParams::default(),
                 &mask,
             )
+            .await
             .unwrap();
         assert!(!results.is_empty());
         assert!(results.iter().all(|(row_id, _)| row_id % 3 == 0));
@@ -348,7 +382,7 @@ async fn test_search_respects_mask() {
         n_full_scores: 4 * 400,
         centroid_score_threshold: None,
     };
-    let recall = recall(&index, &mut corpus, &exhaustive, &mask);
+    let recall = recall(&index, &mut corpus, &exhaustive, &mask).await;
     assert!(recall >= 0.98, "recall@10 {recall} < 0.98");
 }
 
@@ -366,7 +400,9 @@ async fn test_update_appends_and_filters_old_rows() {
         .await
         .unwrap();
     writer.finish().await.unwrap();
-    let index = PlaidIndex::load(store.clone(), None).await.unwrap();
+    let index = PlaidIndex::load(store.clone(), None, &LanceCache::no_cache())
+        .await
+        .unwrap();
 
     let (_dest_dir, dest) = test_store();
     let keep: RowAddrTreeMap = (100..300u64).collect();
@@ -378,7 +414,9 @@ async fn test_update_appends_and_filters_old_rows() {
         )
         .await
         .unwrap();
-    let updated = PlaidIndex::load(dest.clone(), None).await.unwrap();
+    let updated = PlaidIndex::load(dest.clone(), None, &LanceCache::no_cache())
+        .await
+        .unwrap();
     assert_eq!(updated.num_docs(), 300);
 
     // A document of the new data is its own nearest neighbor; dropped rows never come back.
@@ -394,6 +432,7 @@ async fn test_update_appends_and_filters_old_rows() {
             },
             &RowAddrMask::all_rows(),
         )
+        .await
         .unwrap();
     assert_eq!(results[0].0, 350);
     assert!(results.iter().all(|(row_id, _)| *row_id >= 100));
@@ -412,7 +451,9 @@ async fn test_remap_moves_and_drops_rows() {
     );
     let (_dest_dir, dest) = test_store();
     index.remap(&mapping, dest.as_ref()).await.unwrap();
-    let remapped = PlaidIndex::load(dest.clone(), None).await.unwrap();
+    let remapped = PlaidIndex::load(dest.clone(), None, &LanceCache::no_cache())
+        .await
+        .unwrap();
     assert_eq!(remapped.num_docs(), 150);
     let query = corpus.docs[120].clone().unwrap();
     let results = remapped
@@ -422,6 +463,7 @@ async fn test_remap_moves_and_drops_rows() {
             &PlaidSearchParams::default(),
             &RowAddrMask::all_rows(),
         )
+        .await
         .unwrap();
     assert_eq!(results[0].0, 1120);
 }

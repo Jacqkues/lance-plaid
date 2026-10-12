@@ -15,6 +15,7 @@ use arrow_array::{Array, FixedSizeListArray, Float32Array, cast::AsArray, types:
 use lance_arrow::FixedSizeListArrayExt;
 use lance_core::{Error, Result};
 use lance_linalg::distance::DistanceType;
+use lance_linalg::distance::dot;
 use ndarray::{Array2, ArrayView1, ArrayView2, Axis};
 use rayon::prelude::*;
 
@@ -27,6 +28,9 @@ const ASSIGN_CHUNK_ROWS: usize = 256;
 
 /// Maximum number of held-out residuals used to fit the quantization buckets.
 const MAX_HELDOUT_TOKENS: usize = 50_000;
+
+/// Centroids scored per parallel task when scoring a query against every centroid.
+const SCORE_CHUNK_CENTROIDS: usize = 1024;
 
 /// Quantizes token embeddings as a centroid id and bucketized residuals.
 #[derive(Debug, Clone)]
@@ -41,6 +45,9 @@ pub struct ResidualCodec {
     /// For each byte value, the decoded residuals of the `8 / num_bits`
     /// dimensions packed in it, most significant bits first.
     byte_lut: Vec<f32>,
+    /// `byte_lut` quantized to int8; multiply by `weight_scale` to recover it.
+    byte_lut_i8: Vec<i8>,
+    weight_scale: f32,
 }
 
 impl ResidualCodec {
@@ -68,6 +75,11 @@ impl ResidualCodec {
         }
         let values_per_byte = 8 / num_bits as usize;
         let mask = (num_buckets - 1) as u8;
+        let weight_scale = bucket_weights
+            .iter()
+            .fold(0.0f32, |m, w| m.max(w.abs()))
+            .max(f32::MIN_POSITIVE)
+            / 127.0;
         let mut byte_lut = Vec::with_capacity(256 * values_per_byte);
         for byte in 0..=255u8 {
             for slot in 0..values_per_byte {
@@ -75,12 +87,18 @@ impl ResidualCodec {
                 byte_lut.push(bucket_weights[((byte >> shift) & mask) as usize]);
             }
         }
+        let byte_lut_i8 = byte_lut
+            .iter()
+            .map(|w| (w / weight_scale).round() as i8)
+            .collect();
         Ok(Self {
             num_bits,
             centroids,
             bucket_cutoffs,
             bucket_weights,
             byte_lut,
+            byte_lut_i8,
+            weight_scale,
         })
     }
 
@@ -198,6 +216,26 @@ impl ResidualCodec {
 
     /// Reconstruct one L2-normalized token embedding into `out`.
     pub fn decode_into(&self, code: u32, packed: &[u8], out: &mut [f32]) {
+        let inv_norm = 1.0 / self.decode_unnormalized(code, packed, out).max(1e-12);
+        out.iter_mut().for_each(|v| *v *= inv_norm);
+    }
+
+    /// `1 / ||centroid + residual||` of every encoded token, the factor that
+    /// L2-normalizes its reconstruction.
+    pub fn inv_norms(&self, codes: &[u32], packed: &[u8]) -> Vec<f32> {
+        let mut decoded = vec![0.0; self.dimension()];
+        codes
+            .iter()
+            .zip(packed.chunks_exact(self.packed_dim()))
+            .map(|(&code, packed)| {
+                let norm = self.decode_unnormalized(code, packed, &mut decoded);
+                1.0 / norm.max(1e-12)
+            })
+            .collect()
+    }
+
+    /// Write `centroid + residual` into `out` and return its L2 norm.
+    fn decode_unnormalized(&self, code: u32, packed: &[u8], out: &mut [f32]) -> f32 {
         let dimension = self.dimension();
         let values_per_byte = 8 / self.num_bits as usize;
         let centroids = self
@@ -217,14 +255,73 @@ impl ResidualCodec {
                 norm += *o * *o;
             }
         }
-        let inv_norm = 1.0 / norm.sqrt().max(1e-12);
-        out.iter_mut().for_each(|v| *v *= inv_norm);
+        norm.sqrt()
     }
 
-    /// Inner product of every centroid with every query token, `[num_centroids, num_query_tokens]`.
-    pub fn centroid_scores(&self, query: ArrayView2<f32>) -> Array2<f32> {
-        self.centroids.dot(&query.t())
+    /// Expand a packed residual into its int8 bucket weights, one per dimension.
+    pub fn expand_residual_i8(&self, packed: &[u8], out: &mut [i8]) {
+        let values_per_byte = 8 / self.num_bits as usize;
+        for (out, &byte) in out.chunks_exact_mut(values_per_byte).zip(packed) {
+            out.copy_from_slice(
+                &self.byte_lut_i8[byte as usize * values_per_byte..][..values_per_byte],
+            );
+        }
     }
+
+    /// The value one unit of [`Self::expand_residual_i8`] stands for.
+    pub fn weight_scale(&self) -> f32 {
+        self.weight_scale
+    }
+
+    /// Inner product of every centroid with every row of `query`
+    /// (`num_query_tokens` concatenated embeddings), as a row-major
+    /// `[num_centroids, num_query_tokens]` matrix.
+    pub fn centroid_scores(&self, query: &[f32]) -> Vec<f32> {
+        let dimension = self.dimension();
+        let num_query_tokens = query.len() / dimension;
+        let centroids = self
+            .centroids
+            .as_slice()
+            .expect("centroids are stored in standard layout");
+        let mut scores = vec![0.0f32; self.num_centroids() * num_query_tokens];
+        scores
+            .par_chunks_mut(SCORE_CHUNK_CENTROIDS * num_query_tokens)
+            .zip(centroids.par_chunks(SCORE_CHUNK_CENTROIDS * dimension))
+            .for_each(|(scores, centroids)| {
+                for (row, centroid) in scores
+                    .chunks_exact_mut(num_query_tokens)
+                    .zip(centroids.chunks_exact(dimension))
+                {
+                    for (score, query_token) in row.iter_mut().zip(query.chunks_exact(dimension)) {
+                        *score = dot(centroid, query_token);
+                    }
+                }
+            });
+        scores
+    }
+}
+
+/// Quantize every token of `query` to int8 with its own scale, returning the
+/// quantized values and the per-token scales.
+pub fn quantize_query(query: &[f32], dimension: usize) -> (Vec<i8>, Vec<f32>) {
+    let mut values = Vec::with_capacity(query.len());
+    let mut scales = Vec::with_capacity(query.len() / dimension);
+    for token in query.chunks_exact(dimension) {
+        let scale = token
+            .iter()
+            .fold(0.0f32, |m, v| m.max(v.abs()))
+            .max(f32::MIN_POSITIVE)
+            / 127.0;
+        values.extend(token.iter().map(|v| (v / scale).round() as i8));
+        scales.push(scale);
+    }
+    (values, scales)
+}
+
+/// Inner product of two int8 vectors.
+#[inline]
+pub fn dot_i8(a: &[i8], b: &[i8]) -> i32 {
+    a.iter().zip(b).map(|(&x, &y)| x as i32 * y as i32).sum()
 }
 
 fn validate_num_bits(num_bits: u8) -> Result<()> {
