@@ -14,6 +14,7 @@ use crate::{
             ensure_index_allowed_with_frag_reuse, ensure_index_kind_allowed_with_frag_reuse,
         },
         load_all_indices,
+        plaid::build_plaid_index,
         scalar::{build_bitmap_index_segment, build_scalar_index},
         vector::{
             LANCE_VECTOR_INDEX, StageParams, VectorIndexParams, build_distributed_vector_index,
@@ -27,6 +28,7 @@ use lance_core::datatypes::format_field_path;
 use lance_index::progress::{IndexBuildProgress, NoopIndexBuildProgress};
 use lance_index::{
     IndexParams, IndexType, registry::plugin_name_from_details_url, scalar::CreatedIndex,
+    vector::plaid::PlaidIndexParams,
 };
 use lance_index::{
     metrics::NoOpMetricsCollector,
@@ -389,6 +391,25 @@ impl<'a> CreateIndexBuilder<'a> {
         let index_id = self.index_uuid.unwrap_or_else(Uuid::new_v4);
         let mut output_index_uuid = index_id;
         let created_index = match (self.index_type, self.params.index_name()) {
+            (IndexType::Plaid, _) => {
+                let params_json = self
+                    .params
+                    .as_any()
+                    .downcast_ref::<ScalarIndexParams>()
+                    .and_then(|params| params.params.as_deref())
+                    .unwrap_or("{}");
+                let params = PlaidIndexParams::from_json(params_json)?;
+                build_plaid_index(
+                    self.dataset,
+                    column,
+                    index_id,
+                    &params,
+                    train,
+                    self.fragments.clone(),
+                    self.progress.clone(),
+                )
+                .await?
+            }
             (
                 IndexType::Bitmap
                 | IndexType::BTree
