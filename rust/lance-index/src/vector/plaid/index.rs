@@ -47,7 +47,7 @@ const REMOVED_ROW: u64 = u64::MAX;
 const RESIDUAL_CHUNK_DOCS: usize = 1024;
 
 /// Packed residuals and inverse reconstruction norms of the tokens of
-/// [`RESIDUAL_CHUNK_DOCS`] consecutive documents.
+/// `RESIDUAL_CHUNK_DOCS` consecutive documents.
 #[derive(Debug, DeepSizeOf)]
 pub struct ResidualChunk {
     residuals: Vec<u8>,

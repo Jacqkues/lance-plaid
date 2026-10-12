@@ -312,7 +312,7 @@ message MinHashLshIndexDetails {
 
 /* PLAID multivector index details.
  *
- * A PLAID index stores each document (a row of a List<FixedSizeList<float>>
+ * A PLAID index stores each document (a row of a `List<FixedSizeList<float>>`
  * column) as one centroid id per token plus a `num_bits`-bit quantized
  * residual per token dimension, and an inverted list from each centroid to
  * the documents with a token assigned to it. See ColBERTv2/PLAID
