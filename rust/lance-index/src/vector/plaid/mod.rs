@@ -124,7 +124,8 @@ pub struct PlaidSearchParams {
     /// best quarter of them is rescored exactly.
     pub n_full_scores: usize,
     /// Probed centroids whose best score over all query tokens is below this
-    /// threshold are skipped. `None` keeps every probed centroid.
+    /// threshold are skipped, except the best centroid of each query token.
+    /// `None` keeps every probed centroid.
     pub centroid_score_threshold: Option<f32>,
 }
 

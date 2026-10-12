@@ -294,6 +294,28 @@ async fn test_null_and_empty_documents_are_not_indexed() {
 }
 
 #[tokio::test]
+async fn test_score_threshold_keeps_best_centroid_of_each_token() {
+    let mut corpus = Corpus::new(200, 8);
+    let (_dir, store) = test_store();
+    let index = build(&corpus, &store, 4).await;
+    let query = corpus.sample(4);
+    // No centroid can reach this score: only each token's best one is probed.
+    let params = PlaidSearchParams {
+        centroid_score_threshold: Some(10.0),
+        ..Default::default()
+    };
+    let results = index
+        .search(
+            query.as_slice().unwrap(),
+            5,
+            &params,
+            &RowAddrMask::all_rows(),
+        )
+        .unwrap();
+    assert_eq!(results.len(), 5);
+}
+
+#[tokio::test]
 async fn test_search_respects_mask() {
     let mut corpus = Corpus::new(400, 4);
     let (_dir, store) = test_store();

@@ -277,18 +277,23 @@ impl PlaidIndex {
             |centroid: u32, token: usize| scores[centroid as usize * num_query_tokens + token];
         let num_probes = params.n_ivf_probe.clamp(1, num_centroids);
         let mut probed = vec![false; num_centroids];
+        // The best centroid of every query token survives the score threshold,
+        // so that a query far from every centroid still has candidates.
+        let mut is_best = vec![false; num_centroids];
         let mut order: Vec<u32> = (0..num_centroids as u32).collect();
         for token in 0..num_query_tokens {
-            order.select_nth_unstable_by(num_probes - 1, |&a, &b| {
-                score(b, token).total_cmp(&score(a, token))
-            });
+            let by_score = |a: &u32, b: &u32| score(*b, token).total_cmp(&score(*a, token));
+            order.select_nth_unstable_by(num_probes - 1, by_score);
             for &centroid in &order[..num_probes] {
                 probed[centroid as usize] = true;
+            }
+            if let Some(&best) = order[..num_probes].iter().min_by(|a, b| by_score(a, b)) {
+                is_best[best as usize] = true;
             }
         }
         if let Some(threshold) = params.centroid_score_threshold {
             for (centroid, is_probed) in probed.iter_mut().enumerate() {
-                if *is_probed {
+                if *is_probed && !is_best[centroid] {
                     let row = &scores[centroid * num_query_tokens..][..num_query_tokens];
                     *is_probed = row.iter().copied().fold(f32::NEG_INFINITY, f32::max) >= threshold;
                 }

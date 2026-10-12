@@ -4062,6 +4062,32 @@ class LanceDataset(pa.dataset.Dataset):
         kwargs["metric_type"] = metric
 
         index_type = index_type.upper()
+        if index_type == "PLAID":
+            if len(column) != 1 or not is_multivec:
+                raise TypeError(
+                    "PLAID index requires one multivector column "
+                    "(List<FixedSizeList<float32>>)"
+                )
+            if metric.lower() != "cosine":
+                raise ValueError(
+                    f"PLAID index only supports the cosine metric, got {metric}"
+                )
+            plaid_params = {
+                key: kwargs.pop(key)
+                for key in ("num_bits", "num_centroids", "max_iters", "sample_rate", "seed")
+                if key in kwargs
+            }
+            if num_partitions is not None:
+                plaid_params.setdefault("num_centroids", num_partitions)
+            return self._ds.create_index(
+                column,
+                index_type,
+                name,
+                replace,
+                train,
+                storage_options,
+                {"plaid_params": json.dumps(plaid_params)},
+            )
         valid_index_types = [
             "IVF_FLAT",
             "IVF_PQ",

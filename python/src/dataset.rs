@@ -2645,6 +2645,7 @@ impl Dataset {
             "RTREE" => IndexType::RTree,
             "INVERTED" | "FTS" => IndexType::Inverted,
             "FM" => IndexType::Fm,
+            "PLAID" => IndexType::Plaid,
             "IVF_FLAT" | "IVF_PQ" | "IVF_SQ" | "IVF_RQ" | "IVF_HNSW_FLAT" | "IVF_HNSW_PQ"
             | "IVF_HNSW_SQ" => IndexType::Vector,
             _ => {
@@ -2684,6 +2685,19 @@ impl Dataset {
                 index_type: "rtree".to_string(),
                 params: None,
             }),
+            "PLAID" => {
+                let params = match kwargs {
+                    Some(kwargs) => kwargs
+                        .get_item("plaid_params")?
+                        .map(|params| params.extract::<String>())
+                        .transpose()?,
+                    None => None,
+                };
+                Box::new(ScalarIndexParams {
+                    index_type: "plaid".to_string(),
+                    params,
+                })
+            }
             "FM" => {
                 let mut params_json = serde_json::Map::new();
                 if let Some(kwargs) = kwargs
