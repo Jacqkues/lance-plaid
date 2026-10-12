@@ -188,7 +188,7 @@ fn recall(
         let query = corpus.sample(8);
         let expected = corpus.exact_top_k(&query, 10);
         let found: Vec<u64> = index
-            .search(query.view(), 10, params, mask)
+            .search(query.as_slice().unwrap(), 10, params, mask)
             .unwrap()
             .into_iter()
             .map(|(row_id, _)| row_id)
@@ -242,7 +242,7 @@ async fn test_distance_is_num_query_tokens_minus_maxsim() {
     let query = corpus.sample(8);
     let results = index
         .search(
-            query.view(),
+            query.as_slice().unwrap(),
             5,
             &PlaidSearchParams::default(),
             &RowAddrMask::all_rows(),
@@ -275,7 +275,7 @@ async fn test_null_and_empty_documents_are_not_indexed() {
     let query = corpus.sample(8);
     let results = index
         .search(
-            query.view(),
+            query.as_slice().unwrap(),
             300,
             &PlaidSearchParams {
                 n_ivf_probe: 32,
@@ -303,7 +303,12 @@ async fn test_search_respects_mask() {
     for _ in 0..5 {
         let query = corpus.sample(8);
         let results = index
-            .search(query.view(), 10, &PlaidSearchParams::default(), &mask)
+            .search(
+                query.as_slice().unwrap(),
+                10,
+                &PlaidSearchParams::default(),
+                &mask,
+            )
             .unwrap();
         assert!(!results.is_empty());
         assert!(results.iter().all(|(row_id, _)| row_id % 3 == 0));
@@ -358,7 +363,7 @@ async fn test_update_appends_and_filters_old_rows() {
     let query = corpus.docs[350].clone().unwrap();
     let results = updated
         .search(
-            query.view(),
+            query.as_slice().unwrap(),
             400,
             &PlaidSearchParams {
                 n_ivf_probe: 32,
@@ -390,7 +395,7 @@ async fn test_remap_moves_and_drops_rows() {
     let query = corpus.docs[120].clone().unwrap();
     let results = remapped
         .search(
-            query.view(),
+            query.as_slice().unwrap(),
             5,
             &PlaidSearchParams::default(),
             &RowAddrMask::all_rows(),

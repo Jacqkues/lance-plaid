@@ -85,6 +85,7 @@ pub mod frag_reuse_reader;
 mod frag_reuse_remapping;
 pub(crate) mod frag_reuse_with_stable_row_ids;
 pub mod mem_wal;
+mod plaid;
 pub mod prefilter;
 pub mod scalar;
 pub(crate) mod scalar_logical;
@@ -1469,6 +1470,7 @@ fn legacy_type_name(index_uri: &str, index_type_hint: Option<&str>) -> String {
         "Inverted" => IndexType::Inverted.to_string(),
         "FMIndex" | "FM" => IndexType::Fm.to_string(),
         "MinHashLsh" => IndexType::MinHashLsh.to_string(),
+        "Plaid" => IndexType::Plaid.to_string(),
         "Json" => IndexType::Scalar.to_string(),
         "Flat" | "Vector" => IndexType::Vector.to_string(),
         other if other.contains("Vector") => IndexType::Vector.to_string(),

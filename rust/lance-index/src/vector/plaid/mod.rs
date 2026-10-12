@@ -54,7 +54,8 @@ use crate::scalar::expression::ScalarQueryParser;
 use crate::scalar::registry::ScalarIndexPlugin;
 use crate::scalar::{IndexStore, RowIdRemapper, ScalarIndex};
 
-pub(crate) const PLAID_INDEX_VERSION: u32 = 0;
+/// On-disk format version of PLAID index segments.
+pub const PLAID_INDEX_VERSION: u32 = 0;
 
 /// Parameters to build a PLAID index.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -137,7 +138,8 @@ impl Default for PlaidSearchParams {
     }
 }
 
-pub(crate) fn details_any(codec: &ResidualCodec) -> prost_types::Any {
+/// The index details recorded in the manifest for a segment encoded with `codec`.
+pub fn details_any(codec: &ResidualCodec) -> prost_types::Any {
     prost_types::Any::from_msg(&pb::PlaidIndexDetails {
         num_bits: codec.num_bits() as u32,
         num_centroids: codec.num_centroids() as u32,

@@ -240,28 +240,30 @@ impl PlaidIndex {
     }
 
     /// Return the `k` documents with the highest MaxSim score to `query`
-    /// (one query token per row) among the rows `mask` selects, as
-    /// `(row_id, distance)` ordered by ascending distance.
+    /// (the query token embeddings concatenated) among the rows `mask`
+    /// selects, as `(row_id, distance)` ordered by ascending distance.
     ///
     /// The distance is `num_query_tokens - MaxSim` over L2-normalized tokens,
     /// the multivector cosine distance of a flat search.
     pub fn search(
         &self,
-        query: ArrayView2<f32>,
+        query: &[f32],
         k: usize,
         params: &PlaidSearchParams,
         mask: &RowAddrMask,
     ) -> Result<Vec<(u64, f32)>> {
-        if query.ncols() != self.dimension() {
+        let dimension = self.dimension();
+        if query.is_empty() || !query.len().is_multiple_of(dimension) {
             return Err(Error::invalid_input(format!(
-                "PLAID query has vectors of dimension {} but the index has dimension {}",
-                query.ncols(),
-                self.dimension()
+                "PLAID query has {} values, not a positive multiple of the index dimension {dimension}",
+                query.len()
             )));
         }
-        if k == 0 || query.nrows() == 0 || self.num_docs() == 0 {
+        if k == 0 || self.num_docs() == 0 {
             return Ok(Vec::new());
         }
+        let query = ArrayView2::from_shape((query.len() / dimension, dimension), query)
+            .map_err(|e| Error::invalid_input(format!("invalid PLAID query shape: {e}")))?;
         let query = normalize_rows(query.to_owned());
         let num_query_tokens = query.nrows();
         let num_centroids = self.codec.num_centroids();
@@ -335,7 +337,6 @@ impl PlaidIndex {
         top_by_score(&mut approx, num_decompress);
 
         // Stage 4: exact MaxSim on decompressed tokens.
-        let dimension = self.dimension();
         let packed_dim = self.codec.packed_dim();
         let mut exact: Vec<(u32, f32)> = approx
             .par_iter()
