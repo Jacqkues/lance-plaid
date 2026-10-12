@@ -32,15 +32,15 @@ pub const IVF_FILE: &str = "plaid_ivf.lance";
 /// One row per indexed document: row id, centroid id and packed residual of each token.
 pub const DOCS_FILE: &str = "plaid_docs.lance";
 
-pub(crate) const METADATA_KEY: &str = "lance:plaid";
-pub(crate) const FILE_FORMAT_VERSION: u32 = 1;
+pub const METADATA_KEY: &str = "lance:plaid";
+pub const FILE_FORMAT_VERSION: u32 = 1;
 
-pub(crate) const CENTROID_COLUMN: &str = "centroid";
-pub(crate) const IVF_LENGTH_COLUMN: &str = "ivf_length";
-pub(crate) const DOC_ID_COLUMN: &str = "doc_id";
-pub(crate) const CODES_COLUMN: &str = "codes";
-pub(crate) const RESIDUALS_COLUMN: &str = "residuals";
-pub(crate) const INV_NORMS_COLUMN: &str = "inv_norms";
+pub const CENTROID_COLUMN: &str = "centroid";
+pub const IVF_LENGTH_COLUMN: &str = "ivf_length";
+pub const DOC_ID_COLUMN: &str = "doc_id";
+pub const CODES_COLUMN: &str = "codes";
+pub const RESIDUALS_COLUMN: &str = "residuals";
+pub const INV_NORMS_COLUMN: &str = "inv_norms";
 
 /// Rows per batch when writing the inverted lists.
 const IVF_WRITE_ROWS: usize = 1 << 20;
@@ -48,7 +48,7 @@ const IVF_WRITE_ROWS: usize = 1 << 20;
 /// Everything about a segment that is not stored as rows, kept in the schema
 /// metadata of the centroids file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub(crate) struct PlaidFileMetadata {
+pub struct PlaidFileMetadata {
     pub version: u32,
     pub num_bits: u8,
     pub dimension: usize,
@@ -59,7 +59,7 @@ pub(crate) struct PlaidFileMetadata {
     pub bucket_weights: Vec<f32>,
 }
 
-pub(crate) fn docs_schema() -> Arc<Schema> {
+pub fn docs_schema() -> Arc<Schema> {
     Arc::new(Schema::new(vec![
         Field::new(ROW_ID, DataType::UInt64, false),
         Field::new(
@@ -119,7 +119,7 @@ impl<'a> PlaidIndexWriter<'a> {
     }
 
     /// Write documents that were already encoded with this writer's codec.
-    pub(crate) async fn write_encoded(&mut self, docs: RecordBatch) -> Result<()> {
+    pub async fn write_encoded(&mut self, docs: RecordBatch) -> Result<()> {
         if docs.num_rows() == 0 {
             return Ok(());
         }
@@ -314,15 +314,12 @@ fn encode_batch(codec: &ResidualCodec, batch: &RecordBatch) -> Result<RecordBatc
 }
 
 /// The docs of `batch` (docs file rows) for which `keep` is true.
-pub(crate) fn filter_docs(
-    batch: &RecordBatch,
-    keep: &arrow_array::BooleanArray,
-) -> Result<RecordBatch> {
+pub fn filter_docs(batch: &RecordBatch, keep: &arrow_array::BooleanArray) -> Result<RecordBatch> {
     Ok(arrow_select::filter::filter_record_batch(batch, keep)?)
 }
 
 /// Replace the row ids of encoded docs, dropping docs whose new row id is `None`.
-pub(crate) fn with_row_ids(batch: &RecordBatch, row_ids: Vec<Option<u64>>) -> Result<RecordBatch> {
+pub fn with_row_ids(batch: &RecordBatch, row_ids: Vec<Option<u64>>) -> Result<RecordBatch> {
     let keep = arrow_array::BooleanArray::from_iter(row_ids.iter().map(|id| Some(id.is_some())));
     let row_ids = UInt64Array::from_iter_values(row_ids.into_iter().flatten());
     let kept = filter_docs(batch, &keep)?;

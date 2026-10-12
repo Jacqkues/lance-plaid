@@ -68,7 +68,7 @@ impl ResidualCodec {
             )));
         }
         let dimension = centroids.ncols();
-        if dimension == 0 || (dimension * num_bits as usize) % 8 != 0 {
+        if dimension == 0 || !(dimension * num_bits as usize).is_multiple_of(8) {
             return Err(Error::invalid_input(format!(
                 "PLAID index needs dimension * num_bits to be a positive multiple of 8, got dimension={dimension} and num_bits={num_bits}"
             )));
@@ -342,10 +342,7 @@ fn assign(centroids: ArrayView2<f32>, tokens: ArrayView2<f32>) -> Vec<u32> {
         .into_par_iter()
         .flat_map_iter(|chunk| {
             let scores = chunk.dot(&centroids.t());
-            scores
-                .axis_iter(Axis(0))
-                .map(|row| argmax(row))
-                .collect::<Vec<_>>()
+            scores.axis_iter(Axis(0)).map(argmax).collect::<Vec<_>>()
         })
         .collect()
 }
@@ -375,7 +372,7 @@ fn quantile(sorted: &[f32], q: f64) -> f32 {
 }
 
 /// Copy a `FixedSizeList<Float32>` into a `[len, dimension]` matrix.
-pub(crate) fn fsl_to_array2(array: &FixedSizeListArray) -> Result<Array2<f32>> {
+pub fn fsl_to_array2(array: &FixedSizeListArray) -> Result<Array2<f32>> {
     let dimension = array.value_length() as usize;
     let values = array
         .values()
@@ -392,7 +389,7 @@ pub(crate) fn fsl_to_array2(array: &FixedSizeListArray) -> Result<Array2<f32>> {
         .map_err(|e| Error::index(format!("invalid vector shape: {e}")))
 }
 
-pub(crate) fn normalize_rows(mut matrix: Array2<f32>) -> Array2<f32> {
+pub fn normalize_rows(mut matrix: Array2<f32>) -> Array2<f32> {
     for mut row in matrix.axis_iter_mut(Axis(0)) {
         let norm = row.dot(&row).sqrt().max(1e-12);
         row /= norm;

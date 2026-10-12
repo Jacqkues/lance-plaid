@@ -260,7 +260,6 @@ async fn test_search_recall_against_exact_maxsim(#[case] num_bits: u8) {
         centroid_score_threshold: None,
     };
     let recall = recall(&index, &mut corpus, &params, &RowAddrMask::all_rows()).await;
-    eprintln!("num_bits={num_bits} recall={recall}");
     assert!(recall >= 0.7, "recall@10 {recall} < 0.7");
 }
 

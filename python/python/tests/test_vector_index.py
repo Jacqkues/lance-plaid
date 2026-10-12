@@ -1628,7 +1628,13 @@ def test_plaid_multivec_ann(tmp_path: Path):
         # the 8-bit residual quantization.
         results = ds.to_table(
             columns=["id"],
-            nearest={"column": "vector", "q": query, "k": 10, "nprobes": 16, "ef": 1200},
+            nearest={
+                "column": "vector",
+                "q": query,
+                "k": 10,
+                "nprobes": 16,
+                "ef": 1200,
+            },
         )
         assert results.num_rows == 10
         hits += len(set(results["id"].to_pylist()) & set(expected["id"].to_pylist()))

@@ -4074,7 +4074,13 @@ class LanceDataset(pa.dataset.Dataset):
                 )
             plaid_params = {
                 key: kwargs.pop(key)
-                for key in ("num_bits", "num_centroids", "max_iters", "sample_rate", "seed")
+                for key in (
+                    "num_bits",
+                    "num_centroids",
+                    "max_iters",
+                    "sample_rate",
+                    "seed",
+                )
                 if key in kwargs
             }
             if num_partitions is not None:
