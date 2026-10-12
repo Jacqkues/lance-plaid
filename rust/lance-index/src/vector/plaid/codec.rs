@@ -198,21 +198,27 @@ impl ResidualCodec {
 
     /// Reconstruct one L2-normalized token embedding into `out`.
     pub fn decode_into(&self, code: u32, packed: &[u8], out: &mut [f32]) {
+        let dimension = self.dimension();
         let values_per_byte = 8 / self.num_bits as usize;
-        let centroid = self.centroids.row(code as usize);
-        for (byte_idx, &byte) in packed.iter().enumerate() {
-            let lut = &self.byte_lut[byte as usize * values_per_byte..][..values_per_byte];
-            let dims = byte_idx * values_per_byte..(byte_idx + 1) * values_per_byte;
-            for ((o, c), w) in out[dims.clone()]
-                .iter_mut()
-                .zip(centroid.slice(ndarray::s![dims]))
-                .zip(lut)
-            {
+        let centroids = self
+            .centroids
+            .as_slice()
+            .expect("centroids are stored in standard layout");
+        let centroid = &centroids[code as usize * dimension..][..dimension];
+        let mut norm = 0.0f32;
+        for ((out, centroid), &byte) in out
+            .chunks_exact_mut(values_per_byte)
+            .zip(centroid.chunks_exact(values_per_byte))
+            .zip(packed)
+        {
+            let weights = &self.byte_lut[byte as usize * values_per_byte..][..values_per_byte];
+            for ((o, c), w) in out.iter_mut().zip(centroid).zip(weights) {
                 *o = c + w;
+                norm += *o * *o;
             }
         }
-        let norm = out.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-12);
-        out.iter_mut().for_each(|v| *v /= norm);
+        let inv_norm = 1.0 / norm.sqrt().max(1e-12);
+        out.iter_mut().for_each(|v| *v *= inv_norm);
     }
 
     /// Inner product of every centroid with every query token, `[num_centroids, num_query_tokens]`.

@@ -15,8 +15,9 @@ use datafusion::execution::SendableRecordBatchStream;
 use lance_core::deepsize::{Context, DeepSizeOf};
 use lance_core::utils::row_addr_remap::RowAddrRemap;
 use lance_core::{Error, Result};
+use lance_linalg::distance::dot;
 use lance_select::RowAddrMask;
-use ndarray::{Array2, ArrayView2, Axis};
+use ndarray::{Array2, ArrayView2};
 use rayon::prelude::*;
 use roaring::RoaringBitmap;
 
@@ -299,7 +300,6 @@ impl PlaidIndex {
                 }
             }
         }
-
         // Stage 2: candidates are the documents of the probed inverted lists.
         let mut candidates: Vec<u32> = probed
             .iter()
@@ -317,7 +317,6 @@ impl PlaidIndex {
         if candidates.is_empty() {
             return Ok(Vec::new());
         }
-
         // Stage 3: approximate MaxSim with every token replaced by its centroid.
         let mut approx: Vec<(u32, f32)> = candidates
             .par_iter()
@@ -340,30 +339,35 @@ impl PlaidIndex {
         // is worth decompressing.
         let num_decompress = (params.n_full_scores / 4).max(k).min(approx.len());
         top_by_score(&mut approx, num_decompress);
-
         // Stage 4: exact MaxSim on decompressed tokens.
         let packed_dim = self.codec.packed_dim();
+        let query_values = query
+            .as_slice()
+            .ok_or_else(|| Error::internal("normalized query is not contiguous".to_string()))?;
         let mut exact: Vec<(u32, f32)> = approx
             .par_iter()
-            .map(|&(doc, _)| {
-                let tokens = self.token_offsets[doc as usize]..self.token_offsets[doc as usize + 1];
-                let mut decoded = Array2::<f32>::zeros((tokens.len(), dimension));
-                for (mut row, token) in decoded.axis_iter_mut(Axis(0)).zip(tokens) {
-                    let packed = &self.residuals[token * packed_dim..][..packed_dim];
-                    self.codec.decode_into(
-                        self.codes[token],
-                        packed,
-                        row.as_slice_mut()
-                            .expect("rows of a standard layout array are contiguous"),
-                    );
-                }
-                let similarities = query.dot(&decoded.t());
-                let score: f32 = similarities
-                    .axis_iter(Axis(0))
-                    .map(|row| row.iter().copied().fold(f32::NEG_INFINITY, f32::max))
-                    .sum();
-                (doc, score)
-            })
+            .map_init(
+                || {
+                    (
+                        vec![0.0f32; dimension],
+                        vec![f32::NEG_INFINITY; num_query_tokens],
+                    )
+                },
+                |(decoded, best), &(doc, _)| {
+                    best.fill(f32::NEG_INFINITY);
+                    let doc = doc as usize;
+                    for token in self.token_offsets[doc]..self.token_offsets[doc + 1] {
+                        let packed = &self.residuals[token * packed_dim..][..packed_dim];
+                        self.codec.decode_into(self.codes[token], packed, decoded);
+                        for (b, query_token) in
+                            best.iter_mut().zip(query_values.chunks_exact(dimension))
+                        {
+                            *b = b.max(dot(query_token, decoded));
+                        }
+                    }
+                    (doc as u32, best.iter().sum())
+                },
+            )
             .collect();
         let num_results = k.min(exact.len());
         top_by_score(&mut exact, num_results);
