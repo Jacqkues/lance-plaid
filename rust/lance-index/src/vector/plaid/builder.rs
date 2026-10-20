@@ -103,7 +103,7 @@ impl<'a> PlaidIndexWriter<'a> {
         })
     }
 
-    /// Encode and write a stream of `value` (`List<FixedSizeList<Float32>>`)
+    /// Encode and write a stream of `value` (`List<FixedSizeList<Float16 | Float32>>`)
     /// and `_rowid` batches. Null and empty multivectors are not indexed.
     pub async fn write_stream(&mut self, mut data: SendableRecordBatchStream) -> Result<()> {
         while let Some(batch) = data.try_next().await? {
@@ -253,13 +253,13 @@ fn encode_batch(codec: &ResidualCodec, batch: &RecordBatch) -> Result<RecordBatc
     })?;
     let lists = values.as_list_opt::<i32>().ok_or_else(|| {
         Error::invalid_input(format!(
-            "PLAID index requires a List<FixedSizeList<Float32>> column, got {}",
+            "PLAID index requires a List<FixedSizeList<Float16 | Float32>> column, got {}",
             values.data_type()
         ))
     })?;
     let tokens = lists.values().as_fixed_size_list_opt().ok_or_else(|| {
         Error::invalid_input(format!(
-            "PLAID index requires a List<FixedSizeList<Float32>> column, got {}",
+            "PLAID index requires a List<FixedSizeList<Float16 | Float32>> column, got {}",
             values.data_type()
         ))
     })?;

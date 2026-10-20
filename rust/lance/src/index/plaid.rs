@@ -48,12 +48,13 @@ pub(super) async fn build_plaid_index(
         field.data_type(),
         DataType::List(item) if matches!(
             item.data_type(),
-            DataType::FixedSizeList(value, _) if value.data_type() == &DataType::Float32
+            DataType::FixedSizeList(value, _)
+                if matches!(value.data_type(), DataType::Float16 | DataType::Float32)
         )
     );
     if !is_multivector {
         return Err(Error::invalid_input(format!(
-            "PLAID index requires a List<FixedSizeList<Float32>> column, column {column} has type {}",
+            "PLAID index requires a List<FixedSizeList<Float16 | Float32>> column, column {column} has type {}",
             field.data_type()
         )));
     }
@@ -121,8 +122,8 @@ mod tests {
     use arrow_array::cast::AsArray;
     use arrow_array::types::{Float32Type, Int32Type};
     use arrow_array::{
-        ArrayRef, FixedSizeListArray, Float32Array, Int32Array, ListArray, RecordBatch,
-        RecordBatchIterator,
+        ArrayRef, FixedSizeListArray, Float16Array, Float32Array, Int32Array, ListArray,
+        RecordBatch, RecordBatchIterator,
     };
     use arrow_buffer::OffsetBuffer;
     use arrow_schema::{DataType, Field, Schema};
@@ -130,6 +131,7 @@ mod tests {
     use lance_index::scalar::{BuiltinIndexType, ScalarIndexParams};
     use lance_linalg::distance::DistanceType;
     use rand::{Rng, SeedableRng, rngs::StdRng};
+    use rstest::rstest;
 
     use crate::Dataset;
     use crate::dataset::{WriteMode, WriteParams};
@@ -137,11 +139,12 @@ mod tests {
 
     const DIM: usize = 32;
 
-    fn schema() -> Arc<Schema> {
+    /// `element` is the type of the token values: Float32 or Float16.
+    fn schema(element: &DataType) -> Arc<Schema> {
         let token = Field::new(
             "item",
             DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
+                Arc::new(Field::new("item", element.clone(), true)),
                 DIM as i32,
             ),
             true,
@@ -171,15 +174,24 @@ mod tests {
     struct Data {
         rng: StdRng,
         topics: Vec<Vec<f32>>,
+        element: DataType,
     }
 
     impl Data {
-        fn new() -> Self {
+        fn new(element: DataType) -> Self {
             let mut rng = StdRng::seed_from_u64(42);
             let topics = (0..16)
                 .map(|_| (0..DIM).map(|_| rng.random_range(-1.0..1.0)).collect())
                 .collect();
-            Self { rng, topics }
+            Self {
+                rng,
+                topics,
+                element,
+            }
+        }
+
+        fn schema(&self) -> Arc<Schema> {
+            schema(&self.element)
         }
 
         fn batch(&mut self, ids: std::ops::Range<i32>) -> RecordBatch {
@@ -188,14 +200,20 @@ mod tests {
                 .iter()
                 .flat_map(|&n| tokens(&mut self.rng, &self.topics, n))
                 .collect();
-            let token_field = match schema().field(1).data_type() {
+            let token_field = match self.schema().field(1).data_type() {
                 DataType::List(field) => field.clone(),
                 _ => unreachable!(),
             };
+            let values: ArrayRef = match self.element {
+                DataType::Float16 => Arc::new(Float16Array::from_iter_values(
+                    values.into_iter().map(half::f16::from_f32),
+                )),
+                _ => Arc::new(Float32Array::from(values)),
+            };
             let fsl = FixedSizeListArray::try_new(
-                Arc::new(Field::new("item", DataType::Float32, true)),
+                Arc::new(Field::new("item", self.element.clone(), true)),
                 DIM as i32,
-                Arc::new(Float32Array::from(values)),
+                values,
                 None,
             )
             .unwrap();
@@ -206,7 +224,7 @@ mod tests {
                 None,
             );
             RecordBatch::try_new(
-                schema(),
+                self.schema(),
                 vec![
                     Arc::new(Int32Array::from_iter_values(ids)) as ArrayRef,
                     Arc::new(lists) as ArrayRef,
@@ -227,7 +245,7 @@ mod tests {
 
     async fn dataset(data: &mut Data, params: serde_json::Value) -> Dataset {
         let batch = data.batch(0..300);
-        let reader = RecordBatchIterator::new(vec![Ok(batch)], schema());
+        let reader = RecordBatchIterator::new(vec![Ok(batch)], data.schema());
         let write = WriteParams {
             max_rows_per_file: 100,
             ..Default::default()
@@ -272,9 +290,12 @@ mod tests {
             .count()
     }
 
+    #[rstest]
+    #[case::float32(DataType::Float32)]
+    #[case::float16(DataType::Float16)]
     #[tokio::test]
-    async fn test_plaid_search_matches_flat_search() {
-        let mut data = Data::new();
+    async fn test_plaid_search_matches_flat_search(#[case] element: DataType) {
+        let mut data = Data::new(element);
         let dataset = dataset(
             &mut data,
             serde_json::json!({"num_bits": 8, "num_centroids": 32, "seed": 1}),
@@ -315,9 +336,12 @@ mod tests {
         assert!(default_hits >= 70, "default recall@10 {default_hits}/100");
     }
 
+    #[rstest]
+    #[case::float32(DataType::Float32)]
+    #[case::float16(DataType::Float16)]
     #[tokio::test]
-    async fn test_plaid_search_with_filter_refine_deletion_and_append() {
-        let mut data = Data::new();
+    async fn test_plaid_search_with_filter_refine_deletion_and_append(#[case] element: DataType) {
+        let mut data = Data::new(element);
         let mut dataset = dataset(
             &mut data,
             serde_json::json!({"num_bits": 4, "num_centroids": 32, "seed": 1}),
@@ -357,10 +381,12 @@ mod tests {
         // Rows appended after the index was built are searched exhaustively.
         let appended = data.batch(300..310);
         let new_doc = appended["vec"].as_list::<i32>().value(3);
+        // The query is always float32, whatever the column type.
         let new_query = ListArray::from_iter_primitive::<Float32Type, _, _>(
             new_doc.as_fixed_size_list().iter().map(|t| {
+                let token = arrow_cast::cast(&t.unwrap(), &DataType::Float32).unwrap();
                 Some(
-                    t.unwrap()
+                    token
                         .as_primitive::<Float32Type>()
                         .values()
                         .iter()
@@ -369,7 +395,7 @@ mod tests {
                 )
             }),
         );
-        let reader = RecordBatchIterator::new(vec![Ok(appended)], schema());
+        let reader = RecordBatchIterator::new(vec![Ok(appended)], data.schema());
         let append = WriteParams {
             mode: WriteMode::Append,
             ..Default::default()

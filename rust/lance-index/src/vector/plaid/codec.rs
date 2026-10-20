@@ -11,7 +11,12 @@
 //!
 //! Adapted from lightonai/next-plaid (Apache-2.0).
 
-use arrow_array::{Array, FixedSizeListArray, Float32Array, cast::AsArray, types::Float32Type};
+use arrow_array::{
+    Array, FixedSizeListArray, Float32Array,
+    cast::AsArray,
+    types::{Float16Type, Float32Type},
+};
+use arrow_schema::DataType;
 use lance_arrow::FixedSizeListArrayExt;
 use lance_core::{Error, Result};
 use lance_linalg::distance::DistanceType;
@@ -371,21 +376,31 @@ fn quantile(sorted: &[f32], q: f64) -> f32 {
     sorted[lo] + (sorted[hi] - sorted[lo]) * frac
 }
 
-/// Copy a `FixedSizeList<Float32>` into a `[len, dimension]` matrix.
+/// Copy a `FixedSizeList<Float16 | Float32>` into a `[len, dimension]` f32 matrix.
+///
+/// This is the only place vectors enter the codec: training and encoding both
+/// go through it, so a float16 column is widened here, one batch at a time,
+/// and the stored column keeps its compact type. The codec itself (centroids,
+/// residual buckets, norms) always works in f32.
 pub fn fsl_to_array2(array: &FixedSizeListArray) -> Result<Array2<f32>> {
     let dimension = array.value_length() as usize;
-    let values = array
-        .values()
-        .as_primitive_opt::<Float32Type>()
-        .ok_or_else(|| {
-            Error::invalid_input(format!(
-                "PLAID index only supports float32 vectors, got {}",
-                array.value_type()
-            ))
-        })?;
     let start = array.offset() * dimension;
-    let values = &values.values()[start..start + array.len() * dimension];
-    Array2::from_shape_vec((array.len(), dimension), values.to_vec())
+    let end = start + array.len() * dimension;
+    let values = match array.value_type() {
+        DataType::Float32 => {
+            array.values().as_primitive::<Float32Type>().values()[start..end].to_vec()
+        }
+        DataType::Float16 => array.values().as_primitive::<Float16Type>().values()[start..end]
+            .iter()
+            .map(|v| v.to_f32())
+            .collect(),
+        other => {
+            return Err(Error::invalid_input(format!(
+                "PLAID index only supports float16 and float32 vectors, got {other}"
+            )));
+        }
+    };
+    Array2::from_shape_vec((array.len(), dimension), values)
         .map_err(|e| Error::index(format!("invalid vector shape: {e}")))
 }
 
@@ -456,6 +471,27 @@ mod tests {
             mean_cos > min_cos,
             "num_bits={num_bits}: mean cosine {mean_cos} <= {min_cos}"
         );
+    }
+
+    #[test]
+    fn test_fsl_to_array2_widens_float16() {
+        let all = random_tokens(10, 8, 3);
+        let half_values = arrow::compute::cast(all.values(), &DataType::Float16).unwrap();
+        let half_all = FixedSizeListArray::try_new_from_values(half_values, 8).unwrap();
+        // Slices (rows 2..7): the conversion must start at the right token.
+        let (tokens, half_tokens) = (all.slice(2, 5), half_all.slice(2, 5));
+        let expected = fsl_to_array2(&tokens).unwrap();
+        let widened = fsl_to_array2(&half_tokens).unwrap();
+        assert_eq!(widened.dim(), (5, 8));
+        for (a, b) in expected.iter().zip(widened.iter()) {
+            assert!((a - b).abs() < 1e-3, "{a} vs {b}");
+        }
+
+        let doubles = arrow::compute::cast(tokens.values(), &DataType::Float64).unwrap();
+        let doubles = FixedSizeListArray::try_new_from_values(doubles, 8).unwrap();
+        let err = fsl_to_array2(&doubles).unwrap_err();
+        assert!(matches!(err, Error::InvalidInput { .. }), "{err:?}");
+        assert!(err.to_string().contains("got Float64"), "{err}");
     }
 
     #[test]

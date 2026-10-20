@@ -11,7 +11,7 @@
 use std::sync::Arc;
 
 use arrow_array::cast::AsArray;
-use arrow_array::types::Float32Type;
+use arrow_array::types::{Float16Type, Float32Type};
 use arrow_array::{Array, ArrayRef, Float32Array, RecordBatch, UInt64Array};
 use datafusion::error::{DataFusionError, Result as DataFusionResult};
 use datafusion::execution::{SendableRecordBatchStream, TaskContext};
@@ -59,21 +59,29 @@ pub fn plaid_search_params(query: &Query) -> PlaidSearchParams {
 }
 
 /// The query tokens of a multivector query as a flat `Float32` array.
+///
+/// The scanner casts the query to the column's element type, so a float16
+/// column hands us a float16 query: it is widened back here, since the codec
+/// scores in f32.
 fn query_values(key: &ArrayRef) -> Result<Float32Array> {
     let values = match key.data_type() {
         arrow_schema::DataType::List(_) => key.as_list::<i32>().values().clone(),
         arrow_schema::DataType::FixedSizeList(_, _) => key.as_fixed_size_list().values().clone(),
         _ => key.clone(),
     };
-    values
-        .as_primitive_opt::<Float32Type>()
-        .cloned()
-        .ok_or_else(|| {
-            Error::invalid_input(format!(
-                "PLAID search only supports float32 query vectors, got {}",
-                values.data_type()
-            ))
-        })
+    match values.data_type() {
+        arrow_schema::DataType::Float32 => Ok(values.as_primitive::<Float32Type>().clone()),
+        arrow_schema::DataType::Float16 => Ok(Float32Array::from_iter_values(
+            values
+                .as_primitive::<Float16Type>()
+                .values()
+                .iter()
+                .map(|v| v.to_f32()),
+        )),
+        other => Err(Error::invalid_input(format!(
+            "PLAID search only supports float16 and float32 query vectors, got {other}"
+        ))),
+    }
 }
 
 /// Searches every segment of a PLAID index and emits the `k` rows with the
