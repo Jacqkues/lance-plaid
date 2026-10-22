@@ -1573,6 +1573,83 @@ def test_multivec_ann(indexed_multivec_dataset: lance.LanceDataset):
         )
 
 
+def _clustered_multivecs(rng, topics, num_rows, num_tokens):
+    """Unit tokens around 3 of the topics per row, like late-interaction embeddings."""
+    rows = []
+    for _ in range(num_rows):
+        row_topics = topics[rng.choice(len(topics), 3)]
+        tokens = row_topics[rng.integers(0, 3, num_tokens)]
+        tokens = tokens + rng.uniform(-0.6, 0.6, tokens.shape)
+        rows.append(tokens / np.linalg.norm(tokens, axis=1, keepdims=True))
+    return rows
+
+
+def test_plaid_multivec_ann(tmp_path: Path):
+    rng = np.random.default_rng(7)
+    topics = rng.uniform(-1, 1, (16, 32))
+    rows = _clustered_multivecs(rng, topics, 300, 8)
+    tbl = pa.table(
+        {
+            "id": pa.array(range(300)),
+            "vector": pa.array(
+                [r.tolist() for r in rows], pa.list_(pa.list_(pa.float32(), 32))
+            ),
+        }
+    )
+    ds = lance.write_dataset(tbl, tmp_path, max_rows_per_file=100)
+    assert len(ds.get_fragments()) == 3
+
+    with pytest.raises(ValueError, match="only supports the cosine metric"):
+        ds.create_index("vector", index_type="PLAID", metric="l2")
+    ds = ds.create_index(
+        "vector",
+        index_type="PLAID",
+        metric="cosine",
+        num_bits=8,
+        num_partitions=16,
+        seed=1,
+    )
+    stats = ds.stats.index_stats("vector_idx")
+    assert stats["index_type"] == "Plaid"
+
+    hits = 0
+    for query in _clustered_multivecs(rng, topics, 5, 4):
+        expected = ds.to_table(
+            columns=["id"],
+            nearest={
+                "column": "vector",
+                "q": query,
+                "k": 10,
+                "use_index": False,
+                "metric": "cosine",
+            },
+        )
+        # Probing every centroid and rescoring every candidate is exact up to
+        # the 8-bit residual quantization.
+        results = ds.to_table(
+            columns=["id"],
+            nearest={
+                "column": "vector",
+                "q": query,
+                "k": 10,
+                "nprobes": 16,
+                "ef": 1200,
+            },
+        )
+        assert results.num_rows == 10
+        hits += len(set(results["id"].to_pylist()) & set(expected["id"].to_pylist()))
+    assert hits / 50 >= 0.9
+
+    filtered = ds.to_table(
+        columns=["id"],
+        filter="id % 2 = 0",
+        prefilter=True,
+        nearest={"column": "vector", "q": query, "k": 10},
+    )
+    assert filtered.num_rows == 10
+    assert all(i % 2 == 0 for i in filtered["id"].to_pylist())
+
+
 def test_multivec_search_paths(tmp_path: Path):
     vector_type = pa.list_(pa.list_(pa.float32(), 2))
     query = np.array([[1.0, 0.0], [0.0, 1.0]], dtype=np.float32)

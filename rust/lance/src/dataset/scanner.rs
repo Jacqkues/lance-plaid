@@ -121,11 +121,12 @@ use crate::io::exec::fts::{
     SharedFtsScorer,
 };
 use crate::io::exec::knn::MultivectorScoringExec;
+use crate::io::exec::plaid::is_plaid_segment;
 use crate::io::exec::scalar_index::{MaterializeIndexExec, ScalarIndexExec};
 use crate::io::exec::{
     AddRowAddrExec, FilterPlan as ExprFilterPlan, FlatMinHashExec, KNNVectorDistanceExec,
-    LancePushdownScanExec, LanceScanExec, MinHashSearchExec, Planner, PreFilterSource,
-    RowAddrMaskFilterExec, ScanConfig, TakeExec,
+    LancePushdownScanExec, LanceScanExec, MinHashSearchExec, PlaidSearchExec, Planner,
+    PreFilterSource, RowAddrMaskFilterExec, ScanConfig, TakeExec,
     knn::{
         KnnBatchParams, QUERY_INDEX_COL, knn_empty_result_schema, new_knn_batch_exec, new_knn_exec,
         query_index_field,
@@ -6497,7 +6498,10 @@ impl Scanner {
                 i.fields.first() == Some(&column_id) && crate::index::index_type_is_known(i)
             }) {
                 // Try to get metric type from index metadata first (fast path for newer indices)
-                let index_metric = if let Some(metric) =
+                let index_metric = if is_plaid_segment(index) {
+                    // PLAID scores MaxSim over L2-normalized tokens.
+                    lance_linalg::distance::DistanceType::Cosine
+                } else if let Some(metric) =
                     crate::index::vector::details::metric_type_from_index_metadata(index)
                 {
                     metric
@@ -6572,6 +6576,12 @@ impl Scanner {
         }
 
         if let Some((index_name, index_segments, index_metric)) = index_and_segments {
+            let is_plaid = index_segments.iter().all(is_plaid_segment);
+            if is_plaid && self.is_batch_nearest {
+                return Err(Error::not_supported(
+                    "batch nearest neighbor search is not supported by PLAID indices".to_string(),
+                ));
+            }
             if self.is_batch_nearest {
                 validate_distance_type_for(index_metric, &element_type)?;
                 return self
@@ -6607,6 +6617,10 @@ impl Scanner {
             let ann_node = match vector_type {
                 DataType::FixedSizeList(_, _) => {
                     self.ann(&q, &index_segments, filter_plan, overlay_block.clone())
+                        .await?
+                }
+                DataType::List(_) if is_plaid => {
+                    self.plaid_ann(&q, &index_segments, filter_plan, overlay_block.clone())
                         .await?
                 }
                 DataType::List(_) => {
@@ -8024,6 +8038,30 @@ impl Scanner {
             SortExec::new([sort_expr, sort_expr_row_id].into(), inner_fanout_search)
                 .with_fetch(Some(q.k * q.refine_factor.unwrap_or(1) as usize)),
         ))
+    }
+
+    /// Create an execution plan for a multivector search with a PLAID index.
+    ///
+    /// Each segment returns its own exact top-k (rescored on decompressed
+    /// tokens), so the node only merges them; `refine_factor` over-fetches for
+    /// a rescoring on the original vectors.
+    async fn plaid_ann(
+        &self,
+        q: &Query,
+        index: &[IndexMetadata],
+        filter_plan: &ExprFilterPlan,
+        overlay_block: Option<RowAddrMask>,
+    ) -> Result<Arc<dyn ExecutionPlan>> {
+        let prefilter_source = self.ann_prefilter_source(filter_plan, index).await?;
+        Ok(Arc::new(PlaidSearchExec::new(
+            self.dataset.clone(),
+            q.clone(),
+            q.k * q.refine_factor.unwrap_or(1) as usize,
+            index.to_vec(),
+            prefilter_source,
+            overlay_block,
+            self.external_row_mask.clone(),
+        )))
     }
 
     // Create an Execution plan to do ANN over multivectors
